@@ -69,17 +69,22 @@ def get_bin_info(card_number):
         logger.error(f"BIN lookup failed: {str(e)}")
         return {"error": str(e)}
 
-# Card Validation with Pre-Authorization Charge (Test Cards Only)
+# Card Validation with Pre-Authorization Charge
 def validate_card(card_number, exp_month, exp_year, cvc):
+    logger.info(f"Validating card: {card_number}")
     if not stripe.api_key:
+        logger.error("Stripe API key missing")
         return {"status": "Dead", "error": "Stripe API key not configured. Contact admin to set STRIPE_API_KEY."}
-
+    
     # Check if it’s a test card
     if card_number not in STRIPE_TEST_CARDS:
+        logger.info(f"Card {card_number} is not a test card")
         return {"status": "Dead", "error": "Only Stripe test cards (e.g., 4242424242424242) are supported without raw card data access. See https://stripe.com/docs/testing#cards"}
-
+    
+    logger.info(f"Card {card_number} is a test card, proceeding with charge validation")
     try:
         # Create a Payment Method
+        logger.info("Creating PaymentMethod")
         payment_method = stripe.PaymentMethod.create(
             type="card",
             card={
@@ -89,8 +94,10 @@ def validate_card(card_number, exp_month, exp_year, cvc):
                 "cvc": cvc,
             },
         )
+        logger.info(f"PaymentMethod created: {payment_method.id}")
 
         # Create a Payment Intent for pre-authorization ($1)
+        logger.info("Creating PaymentIntent")
         payment_intent = stripe.PaymentIntent.create(
             amount=100,  # $1 in cents
             currency="usd",
@@ -100,20 +107,26 @@ def validate_card(card_number, exp_month, exp_year, cvc):
             confirm=True,
             description="Test card validation (pre-auth)",
         )
+        logger.info(f"PaymentIntent created: {payment_intent.id}, status: {payment_intent.status}")
 
         # Check the Payment Intent status
         if payment_intent.status == "requires_capture":
-            stripe.PaymentIntent.cancel(payment_intent.id)  # Cancel to release hold
+            logger.info("Card authorized, cancelling PaymentIntent")
+            stripe.PaymentIntent.cancel(payment_intent.id)
             return {"status": "Live", "payment_intent_id": payment_intent.id}
         elif payment_intent.status == "requires_action":
+            logger.info("Card requires additional authentication")
             return {"status": "Dead", "error": "Card requires additional authentication"}
         else:
             error_msg = payment_intent.last_payment_error.message if payment_intent.last_payment_error else payment_intent.status
+            logger.info(f"Payment failed: {error_msg}")
             return {"status": "Dead", "error": f"Payment failed: {error_msg}"}
 
     except stripe.error.CardError as e:
+        logger.error(f"CardError: {str(e.user_message)}")
         return {"status": "Dead", "error": str(e.user_message)}
     except stripe.error.StripeError as e:
+        logger.error(f"StripeError: {str(e)}")
         return {"status": "Dead", "error": str(e)}
     except Exception as e:
         logger.error(f"Unexpected error in validate_card: {str(e)}")
@@ -155,7 +168,7 @@ def add_sk(update, context):
         stripe.Balance.retrieve()
         logger.info(f"Stripe key updated by user {user_id}")
         update.message.reply_text(
-            "✅ Stripe Secret Key updated successfully! Set STRIPE_API_KEY in Heroku config to persist across restarts.",
+            "✅ Stripe Secret Key updated successfully! Set STRIPE_API_KEY in Koyeb config to persist across restarts.",
             parse_mode="Markdown"
         )
     except stripe.error.AuthenticationError as e:
