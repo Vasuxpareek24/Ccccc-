@@ -60,12 +60,12 @@ def get_bin_info(card_number):
         logger.error(f"BIN lookup failed: {str(e)}")
         return {"error": str(e)}
 
-# Card Validation with Stripe Payment Intent
+# Card Validation with Pre-Authorization Charge
 def validate_card(card_number, exp_month, exp_year, cvc):
     if not stripe.api_key:
         return {"status": "Dead", "error": "Stripe API key not configured. Contact admin to set STRIPE_API_KEY."}
     try:
-        # Create a Payment Method
+        # Step 1: Create a Payment Method
         payment_method = stripe.PaymentMethod.create(
             type="card",
             card={
@@ -75,31 +75,33 @@ def validate_card(card_number, exp_month, exp_year, cvc):
                 "cvc": cvc,
             },
         )
-        
-        # Create a Payment Intent with minimal amount (e.g., $1 = 100 cents)
+
+        # Step 2: Create a Payment Intent for pre-authorization ($1)
         payment_intent = stripe.PaymentIntent.create(
             amount=100,  # $1 in cents
             currency="usd",
             payment_method=payment_method.id,
+            capture_method="manual",  # Authorize only, don’t capture
             confirmation_method="manual",
             confirm=True,
-            description="Test card validation",
-            return_url="https://example.com/return"  # Dummy URL, not needed for bot
+            description="Test card validation (pre-auth)",
         )
-        
-        # Check Payment Intent status
-        if payment_intent.status == "succeeded":
+
+        # Step 3: Check the Payment Intent status
+        if payment_intent.status == "requires_capture":
+            # Card is valid and authorized, but not captured
+            stripe.PaymentIntent.cancel(payment_intent.id)  # Cancel to avoid holding funds
             return {"status": "Live", "payment_intent_id": payment_intent.id}
-        elif payment_intent.status in ["requires_action", "requires_payment_method"]:
-            return {"status": "Dead", "error": "Card requires additional action or declined"}
+        elif payment_intent.status == "requires_action":
+            return {"status": "Dead", "error": "Card requires additional authentication (e.g., 3D Secure)"}
         else:
-            return {"status": "Dead", "error": f"Payment failed: {payment_intent.status}"}
+            return {"status": "Dead", "error": f"Payment failed: {payment_intent.last_payment_error.message if payment_intent.last_payment_error else payment_intent.status}"}
+
     except stripe.error.CardError as e:
         return {"status": "Dead", "error": str(e.user_message)}
     except stripe.error.StripeError as e:
         if "Sending credit card numbers directly" in str(e):
-            # Fallback for 402 error: Mark as Dead with clear message
-            return {"status": "Dead", "error": "Card validation not possible without raw card data access"}
+            return {"status": "Dead", "error": "Card validation blocked by Stripe. Use test cards (e.g., 4242424242424242) or request raw card data access: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"}
         return {"status": "Dead", "error": str(e)}
     except Exception as e:
         logger.error(f"Unexpected error in validate_card: {str(e)}")
@@ -296,7 +298,8 @@ def check_card(update, context):
                     results += f"💳 Brand: {bin_info['brand']}\n"
                     results += f"📋 Type: {bin_info['type']}\n"
                     results += f"🌍 Country: {bin_info['country']}\n"
-                results += "\nℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results."
+                results += "\nℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results.\n"
+                results += "ℹ️ Non-test cards may fail due to Stripe restrictions."
                 context.bot.edit_message_text(
                     chat_id=message.chat_id,
                     message_id=message.message_id,
