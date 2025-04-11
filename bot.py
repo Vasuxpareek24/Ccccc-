@@ -20,16 +20,7 @@ ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "6972264549").split(",") i
 BIN_LOOKUP_URL = "https://lookup.binlist.net/"
 stripe.api_key = os.getenv("STRIPE_API_KEY")
 
-# Stripe Test Cards
-STRIPE_TEST_CARDS = {
-    "4242424242424242": "Live",  # Visa success
-    "4000000000000002": "Dead - Declined",
-    "4000000000009995": "Dead - Insufficient funds",
-    "4000000000000069": "Dead - Expired",
-    "4000000000000127": "Dead - Incorrect CVC",
-}
-
-# Luhn Algorithm
+# Luhn Algorithm for Card Generation
 def luhn_checksum(card_number):
     def digits_of(n):
         return [int(d) for d in str(n)]
@@ -69,22 +60,13 @@ def get_bin_info(card_number):
         logger.error(f"BIN lookup failed: {str(e)}")
         return {"error": str(e)}
 
-# Card Validation with Pre-Authorization Charge
+# Card Validation with Charge (Pre-Authorization)
 def validate_card(card_number, exp_month, exp_year, cvc):
-    logger.info(f"Validating card: {card_number}")
     if not stripe.api_key:
-        logger.error("Stripe API key missing")
         return {"status": "Dead", "error": "Stripe API key not configured. Contact admin to set STRIPE_API_KEY."}
     
-    # Check if it’s a test card
-    if card_number not in STRIPE_TEST_CARDS:
-        logger.info(f"Card {card_number} is not a test card")
-        return {"status": "Dead", "error": "Only Stripe test cards (e.g., 4242424242424242) are supported without raw card data access. See https://stripe.com/docs/testing#cards"}
-    
-    logger.info(f"Card {card_number} is a test card, proceeding with charge validation")
     try:
-        # Create a Payment Method
-        logger.info("Creating PaymentMethod")
+        # Step 1: Create a Payment Method
         payment_method = stripe.PaymentMethod.create(
             type="card",
             card={
@@ -94,65 +76,53 @@ def validate_card(card_number, exp_month, exp_year, cvc):
                 "cvc": cvc,
             },
         )
-        logger.info(f"PaymentMethod created: {payment_method.id}")
 
-        # Create a Payment Intent for pre-authorization ($1)
-        logger.info("Creating PaymentIntent")
+        # Step 2: Create a Payment Intent for $1 pre-authorization
         payment_intent = stripe.PaymentIntent.create(
             amount=100,  # $1 in cents
             currency="usd",
             payment_method=payment_method.id,
-            capture_method="manual",  # Authorize only
+            capture_method="manual",  # Authorize only, don’t capture
             confirmation_method="manual",
             confirm=True,
-            description="Test card validation (pre-auth)",
+            description="Card validation charge test",
         )
-        logger.info(f"PaymentIntent created: {payment_intent.id}, status: {payment_intent.status}")
 
-        # Check the Payment Intent status
+        # Step 3: Check Payment Intent status
         if payment_intent.status == "requires_capture":
-            logger.info("Card authorized, cancelling PaymentIntent")
-            stripe.PaymentIntent.cancel(payment_intent.id)
+            # Card is valid, charge authorized
+            stripe.PaymentIntent.cancel(payment_intent.id)  # Cancel to avoid holding funds
             return {"status": "Live", "payment_intent_id": payment_intent.id}
-        elif payment_intent.status == "requires_action":
-            logger.info("Card requires additional authentication")
-            return {"status": "Dead", "error": "Card requires additional authentication"}
         else:
+            # Card failed (declined, invalid, etc.)
             error_msg = payment_intent.last_payment_error.message if payment_intent.last_payment_error else payment_intent.status
-            logger.info(f"Payment failed: {error_msg}")
-            return {"status": "Dead", "error": f"Payment failed: {error_msg}"}
+            return {"status": "Dead", "error": f"Charge failed: {error_msg}"}
 
-    except stripe.error.CardError as e:
-        logger.error(f"CardError: {str(e.user_message)}")
-        return {"status": "Dead", "error": str(e.user_message)}
     except stripe.error.StripeError as e:
-        logger.error(f"StripeError: {str(e)}")
-        return {"status": "Dead", "error": str(e)}
+        return {"status": "Dead", "error": str(e.user_message if hasattr(e, 'user_message') else e)}
     except Exception as e:
         logger.error(f"Unexpected error in validate_card: {str(e)}")
-        return {"status": "Dead", "error": "Unknown error"}
+        return {"status": "Dead", "error": f"Unknown error: {str(e)}"}
 
 # Telegram Handlers
 def start(update, context):
     user = update.effective_user
     welcome_message = (
         f"👋 *Welcome, {user.first_name}!* 👋\n"
-        "This is a card validation and generation bot using Stripe.\n"
+        "This bot validates cards by attempting a $1 charge via Stripe.\n"
         "Join our channel: @DarkDorking for updates!\n\n"
         "🔍 *Commands:*\n"
         "/chk `card_number|exp_month|exp_year|cvc` - Validate a card\n"
         "/gen `bin` - Generate 15 cards with given BIN\n"
         "Reply /chk to a /gen message to check all generated cards\n"
         "/addsk `secret_key` - Update Stripe key (admin only)\n"
-        "/removesk - Remove Stripe key (admin only)\n\n"
-        "ℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now. Request raw card data access for full functionality: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
+        "/removesk - Remove Stripe key (admin only)"
     )
     update.message.reply_text(welcome_message, parse_mode="Markdown")
 
 def add_sk(update, context):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        logger.info(f"Unauthorized /addsk attempt by user {user_id}")
         update.message.reply_text("🚫 You are not authorized to use this command!", parse_mode="Markdown")
         return
     try:
@@ -166,35 +136,24 @@ def add_sk(update, context):
             return
         stripe.api_key = new_sk
         stripe.Balance.retrieve()
-        logger.info(f"Stripe key updated by user {user_id}")
         update.message.reply_text(
-            "✅ Stripe Secret Key updated successfully! Set STRIPE_API_KEY in Koyeb config to persist across restarts.",
+            "✅ Stripe Secret Key updated! Set STRIPE_API_KEY in Heroku config to persist.",
             parse_mode="Markdown"
         )
-    except stripe.error.AuthenticationError as e:
-        logger.error(f"Invalid Stripe key: {str(e)}")
-        update.message.reply_text("⚠️ Invalid Stripe key! Please check and try again.", parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error in add_sk: {str(e)}")
         update.message.reply_text(f"⚠️ Error updating Stripe key: {str(e)}", parse_mode="Markdown")
 
-def remove_sk_command(update, context):
+def remove_sk(update, context):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        logger.info(f"Unauthorized /removesk attempt by user {user_id}")
         update.message.reply_text("🚫 You are not authorized to use this command!", parse_mode="Markdown")
         return
     stripe.api_key = None
-    logger.info(f"Stripe key removed by user {user_id}")
-    update.message.reply_text("✅ Stripe Secret Key removed successfully!", parse_mode="Markdown")
+    update.message.reply_text("✅ Stripe Secret Key removed!", parse_mode="Markdown")
 
 def generate_cards(update, context):
     if not stripe.api_key:
-        logger.warning("Stripe key not set for /gen")
-        update.message.reply_text(
-            "⚠️ Stripe Secret Key is not configured. Contact @DarkDorking to set STRIPE_API_KEY.",
-            parse_mode="Markdown"
-        )
+        update.message.reply_text("⚠️ Stripe Secret Key not configured. Contact @DarkDorking.", parse_mode="Markdown")
         return
     try:
         command = update.message.text.split(" ", 1)
@@ -228,115 +187,86 @@ def generate_cards(update, context):
             response += f"💳 Brand: {bin_info['brand']}\n"
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
-        response += "\nℹ️ Reply with /chk to validate all generated cards!\n"
-        response += "ℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now."
+        response += "\nℹ️ Reply with /chk to validate all cards via Stripe charge!"
         update.message.reply_text(response, parse_mode="Markdown")
-        logger.info(f"Generated 15 cards for BIN: {bin_prefix}")
     except Exception as e:
-        logger.error(f"Error in generate_cards: {str(e)}")
         update.message.reply_text(f"⚠️ Error: {str(e)}", parse_mode="Markdown")
 
 def check_card(update, context):
-    logger.info(f"Received /chk command from user {update.effective_user.id}")
     if not stripe.api_key:
-        logger.warning("Stripe key not set for /chk")
-        update.message.reply_text(
-            "⚠️ Stripe Secret Key is not configured. Contact @DarkDorking to set STRIPE_API_KEY.",
-            parse_mode="Markdown"
-        )
+        update.message.reply_text("⚠️ Stripe Secret Key not configured. Contact @DarkDorking.", parse_mode="Markdown")
         return
     try:
-        if update.message.reply_to_message:
-            logger.info(f"Reply detected. Replied message text: {update.message.reply_to_message.text[:100]}...")
-            original_message = update.message.reply_to_message.text
-            if "Generated Cards" in original_message:
-                logger.info("Processing as reply to /gen message")
-                lines = original_message.split("\n")
-                cards = []
-                for line in lines:
-                    if line.startswith("💳"):
-                        try:
-                            card_data = line.replace("💳", "").strip().split(" | ")
-                            if len(card_data) == 4:
-                                card_number = card_data[0].replace(" ", "")
-                                exp_month = card_data[1].strip()
-                                exp_year = card_data[2].strip()
-                                cvc = card_data[3].strip()
-                                if (card_number.isdigit() and exp_month.isdigit() and
-                                        exp_year.isdigit() and cvc.isdigit()):
-                                    cards.append({
-                                        "number": card_number,
-                                        "exp_month": int(exp_month),
-                                        "exp_year": int(exp_year),
-                                        "cvc": cvc
-                                    })
-                                else:
-                                    logger.warning(f"Invalid card data in line: {line}")
-                            else:
-                                logger.warning(f"Malformed card line: {line}")
-                        except (ValueError, IndexError) as e:
-                            logger.warning(f"Failed to parse card: {line}, error: {str(e)}")
-                            continue
+        if update.message.reply_to_message and "Generated Cards" in update.message.reply_to_message.text:
+            lines = update.message.reply_to_message.text.split("\n")
+            cards = []
+            for line in lines:
+                if line.startswith("💳"):
+                    try:
+                        card_data = line.replace("💳", "").strip().split(" | ")
+                        if len(card_data) == 4:
+                            card_number, exp_month, exp_year, cvc = card_data
+                            cards.append({
+                                "number": card_number.replace(" ", ""),
+                                "exp_month": int(exp_month),
+                                "exp_year": int(exp_year),
+                                "cvc": cvc
+                            })
+                    except Exception as e:
+                        continue
 
-                if not cards:
-                    logger.error("No valid cards parsed from /gen message")
-                    update.message.reply_text("⚠️ No valid cards found in the replied message!", parse_mode="Markdown")
-                    return
-
-                logger.info(f"Checking {len(cards)} cards")
-                update.message.reply_text("🔄 *Checking cards... Please wait...* 🔄", parse_mode="Markdown")
-                message = update.message.reply_text("📊 *Results*:\nStarting...", parse_mode="Markdown")
-                results = "📊 *Card Check Results* 📊\n\n"
-                batch_results = ""
-                batch_size = 3
-
-                for i, card in enumerate(cards, 1):
-                    result = validate_card(card["number"], card["exp_month"], card["exp_year"], card["cvc"])
-                    status = result["status"]
-                    full_number = card["number"]
-                    result_text = (
-                        f"💳 *Card {i}*\n"
-                        f"🔢 *Card Number*: {full_number}\n"
-                        f"📅 *Expiry*: {card['exp_month']:02d} / {card['exp_year']}\n"
-                        f"🔐 *CVC*: {card['cvc']}\n"
-                        f"{'✅' if status == 'Live' else '❌'} *Status*: {status}\n"
-                    )
-                    if status == "Dead" and "error" in result:
-                        result_text += f"❗ Reason: {result['error']}\n"
-                    batch_results += result_text + "\n"
-                    if i % batch_size == 0 or i == len(cards):
-                        results += batch_results
-                        context.bot.edit_message_text(
-                            chat_id=message.chat_id,
-                            message_id=message.message_id,
-                            text=results,
-                            parse_mode="Markdown"
-                        )
-                        batch_results = ""
-                    time.sleep(0.5)
-
-                bin_info = get_bin_info(cards[0]["number"])
-                results += "\n🏦 *BIN Info*:\n"
-                if "error" in bin_info:
-                    results += f"❌ Error: {bin_info['error']}\n"
-                else:
-                    results += f"🏛 Bank: {bin_info['bank']}\n"
-                    results += f"💳 Brand: {bin_info['brand']}\n"
-                    results += f"📋 Type: {bin_info['type']}\n"
-                    results += f"🌍 Country: {bin_info['country']}\n"
-                results += "\nℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now.\n"
-                results += "ℹ️ Request raw card data access for non-test cards: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
-                context.bot.edit_message_text(
-                    chat_id=message.chat_id,
-                    message_id=message.message_id,
-                    text=results,
-                    parse_mode="Markdown"
-                )
-                logger.info("Card checking completed")
+            if not cards:
+                update.message.reply_text("⚠️ No valid cards found in the replied message!", parse_mode="Markdown")
                 return
 
+            update.message.reply_text("🔄 *Charging cards... Please wait...* 🔄", parse_mode="Markdown")
+            message = update.message.reply_text("📊 *Results*:\nStarting...", parse_mode="Markdown")
+            results = "📊 *Card Check Results* 📊\n\n"
+            batch_results = ""
+            batch_size = 3
+
+            for i, card in enumerate(cards, 1):
+                result = validate_card(card["number"], card["exp_month"], card["exp_year"], card["cvc"])
+                status = result["status"]
+                result_text = (
+                    f"💳 *Card {i}*\n"
+                    f"🔢 *Card Number*: {card['number']}\n"
+                    f"📅 *Expiry*: {card['exp_month']:02d} / {card['exp_year']}\n"
+                    f"🔐 *CVC*: {card['cvc']}\n"
+                    f"{'✅' if status == 'Live' else '❌'} *Status*: {status}\n"
+                )
+                if status == "Dead" and "error" in result:
+                    result_text += f"❗ Reason: {result['error']}\n"
+                batch_results += result_text + "\n"
+                if i % batch_size == 0 or i == len(cards):
+                    results += batch_results
+                    context.bot.edit_message_text(
+                        chat_id=message.chat_id,
+                        message_id=message.message_id,
+                        text=results,
+                        parse_mode="Markdown"
+                    )
+                    batch_results = ""
+                time.sleep(0.5)
+
+            bin_info = get_bin_info(cards[0]["number"])
+            results += "\n🏦 *BIN Info*:\n"
+            if "error" in bin_info:
+                results += f"❌ Error: {bin_info['error']}\n"
+            else:
+                results += f"🏛 Bank: {bin_info['bank']}\n"
+                results += f"💳 Brand: {bin_info['brand']}\n"
+                results += f"📋 Type: {bin_info['type']}\n"
+                results += f"🌍 Country: {bin_info['country']}\n"
+            context.bot.edit_message_text(
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+                text=results,
+                parse_mode="Markdown"
+            )
+            return
+
         # Manual /chk command
-        logger.info("Processing as manual /chk command")
         command = update.message.text.split(" ", 1)
         if len(command) < 2:
             update.message.reply_text("⚠️ Usage: /chk `card_number|exp_month|exp_year|cvc`", parse_mode="Markdown")
@@ -364,11 +294,9 @@ def check_card(update, context):
             response += f"💳 Brand: {bin_info['brand']}\n"
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
-        response += "\nℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now."
         update.message.reply_text(response, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"Error in check_card: {str(e)}")
         update.message.reply_text(f"⚠️ Error: {str(e)}", parse_mode="Markdown")
 
 def error_handler(update, context):
@@ -380,12 +308,12 @@ def main():
     if not stripe.api_key:
         logger.error("STRIPE_API_KEY not set in environment variables.")
     else:
-        logger.info("Stripe API key loaded successfully from environment.")
+        logger.info("Stripe API key loaded successfully.")
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("addsk", add_sk))
-    dp.add_handler(CommandHandler("removesk", remove_sk_command))
+    dp.add_handler(CommandHandler("removesk", remove_sk))
     dp.add_handler(CommandHandler("chk", check_card))
     dp.add_handler(CommandHandler("gen", generate_cards))
     dp.add_error_handler(error_handler)
