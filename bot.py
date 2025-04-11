@@ -1,3 +1,5 @@
+import nest_asyncio
+nest_asyncio.apply()
 import telegram
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 import stripe
