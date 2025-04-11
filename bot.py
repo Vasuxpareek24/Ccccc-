@@ -3,7 +3,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram import Update
 
 # Simulated BIN database
-BIN Database = {
+BIN_DATABASE = {
     "4": {"type": "Visa", "issuer": "Visa Inc.", "country": "United States"},
     "51": {"type": "Mastercard", "issuer": "Mastercard Inc.", "country": "United States"},
     "52": {"type": "Mastercard", "issuer": "Mastercard Inc.", "country": "United States"},
