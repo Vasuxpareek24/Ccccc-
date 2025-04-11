@@ -1,5 +1,5 @@
 import random
-import requests
+import httpx
 import os
 from fastapi import FastAPI, Query
 from typing import Optional
@@ -43,11 +43,12 @@ def generate_card(bin: str) -> str:
 # Fetch BIN details using an external API
 async def get_bin_details(bin: str) -> dict:
     url = f"https://lookup.binlist.net/{bin}"
-    response = requests.get(url)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
     return response.json()
 
 # Send the generated cards to a Telegram bot using the bot token
-def send_to_telegram(message: str):
+async def send_to_telegram(message: str):
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")  # Bot token from environment variable
     chat_id = os.getenv("TELEGRAM_CHAT_ID")  # Chat ID from environment variable
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -56,7 +57,8 @@ def send_to_telegram(message: str):
         "text": message,
         "parse_mode": "Markdown",
     }
-    response = requests.get(url, params=params)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params)
     return response.json()
 
 # Health Check endpoint
@@ -81,6 +83,6 @@ async def gen_cards(bin: str = Query(..., min_length=6, max_length=16), count: i
     )
 
     # Optionally send the message to Telegram
-    send_to_telegram(msg)
+    await send_to_telegram(msg)
 
     return {"message": msg}
