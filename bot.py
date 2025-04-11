@@ -63,10 +63,13 @@ def get_bin_info(card_number):
 # Card Validation with Charge (Pre-Authorization)
 def validate_card(card_number, exp_month, exp_year, cvc):
     if not stripe.api_key:
+        logger.error("Stripe API key missing")
         return {"status": "Dead", "error": "Stripe API key not configured. Contact admin to set STRIPE_API_KEY."}
     
+    logger.info(f"Validating card: {card_number}")
     try:
         # Step 1: Create a Payment Method
+        logger.info("Creating PaymentMethod")
         payment_method = stripe.PaymentMethod.create(
             type="card",
             card={
@@ -76,54 +79,58 @@ def validate_card(card_number, exp_month, exp_year, cvc):
                 "cvc": cvc,
             },
         )
+        logger.info(f"PaymentMethod created: {payment_method.id}")
 
         # Step 2: Create a Payment Intent for $1 pre-authorization
+        logger.info("Creating PaymentIntent")
         payment_intent = stripe.PaymentIntent.create(
             amount=100,  # $1 in cents
             currency="usd",
             payment_method=payment_method.id,
-            capture_method="manual",  # Authorize only, don’t capture
+            capture_method="manual",  # Authorize only
             confirmation_method="manual",
             confirm=True,
             description="Card validation charge test",
         )
+        logger.info(f"PaymentIntent created: {payment_intent.id}, Status: {payment_intent.status}")
 
         # Step 3: Check Payment Intent status
         if payment_intent.status == "requires_capture":
-            # Card is valid, charge authorized
-            stripe.PaymentIntent.cancel(payment_intent.id)  # Cancel to avoid holding funds
+            logger.info("Charge authorized, canceling intent")
+            stripe.PaymentIntent.cancel(payment_intent.id)
             return {"status": "Live", "payment_intent_id": payment_intent.id}
         else:
-            # Card failed (declined, invalid, etc.)
             error_msg = payment_intent.last_payment_error.message if payment_intent.last_payment_error else payment_intent.status
+            logger.info(f"Charge failed: {error_msg}")
             return {"status": "Dead", "error": f"Charge failed: {error_msg}"}
 
     except stripe.error.StripeError as e:
+        logger.error(f"Stripe error: {str(e)}")
         return {"status": "Dead", "error": str(e.user_message if hasattr(e, 'user_message') else e)}
     except Exception as e:
-        logger.error(f"Unexpected error in validate_card: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}")
         return {"status": "Dead", "error": f"Unknown error: {str(e)}"}
 
 # Telegram Handlers
 def start(update, context):
     user = update.effective_user
-    welcome_message = (
+    update.message.reply_text(
         f"👋 *Welcome, {user.first_name}!* 👋\n"
         "This bot validates cards by attempting a $1 charge via Stripe.\n"
         "Join our channel: @DarkDorking for updates!\n\n"
         "🔍 *Commands:*\n"
         "/chk `card_number|exp_month|exp_year|cvc` - Validate a card\n"
-        "/gen `bin` - Generate 15 cards with given BIN\n"
-        "Reply /chk to a /gen message to check all generated cards\n"
+        "/gen `bin` - Generate 15 cards\n"
+        "Reply /chk to check generated cards\n"
         "/addsk `secret_key` - Update Stripe key (admin only)\n"
-        "/removesk - Remove Stripe key (admin only)"
+        "/removesk - Remove Stripe key (admin only)",
+        parse_mode="Markdown"
     )
-    update.message.reply_text(welcome_message, parse_mode="Markdown")
 
 def add_sk(update, context):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        update.message.reply_text("🚫 You are not authorized to use this command!", parse_mode="Markdown")
+        update.message.reply_text("🚫 Unauthorized!", parse_mode="Markdown")
         return
     try:
         command = update.message.text.split(" ", 1)
@@ -132,28 +139,25 @@ def add_sk(update, context):
             return
         new_sk = command[1].strip()
         if not new_sk.startswith("sk_"):
-            update.message.reply_text("⚠️ Invalid Stripe key format! Must start with 'sk_'.", parse_mode="Markdown")
+            update.message.reply_text("⚠️ Invalid key format! Must start with 'sk_'.", parse_mode="Markdown")
             return
         stripe.api_key = new_sk
         stripe.Balance.retrieve()
-        update.message.reply_text(
-            "✅ Stripe Secret Key updated! Set STRIPE_API_KEY in Heroku config to persist.",
-            parse_mode="Markdown"
-        )
+        update.message.reply_text("✅ Stripe key updated! Set STRIPE_API_KEY in Heroku to persist.", parse_mode="Markdown")
     except Exception as e:
-        update.message.reply_text(f"⚠️ Error updating Stripe key: {str(e)}", parse_mode="Markdown")
+        update.message.reply_text(f"⚠️ Error: {str(e)}", parse_mode="Markdown")
 
 def remove_sk(update, context):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        update.message.reply_text("🚫 You are not authorized to use this command!", parse_mode="Markdown")
+        update.message.reply_text("🚫 Unauthorized!", parse_mode="Markdown")
         return
     stripe.api_key = None
-    update.message.reply_text("✅ Stripe Secret Key removed!", parse_mode="Markdown")
+    update.message.reply_text("✅ Stripe key removed!", parse_mode="Markdown")
 
 def generate_cards(update, context):
     if not stripe.api_key:
-        update.message.reply_text("⚠️ Stripe Secret Key not configured. Contact @DarkDorking.", parse_mode="Markdown")
+        update.message.reply_text("⚠️ Stripe key not configured. Contact @DarkDorking.", parse_mode="Markdown")
         return
     try:
         command = update.message.text.split(" ", 1)
@@ -162,7 +166,7 @@ def generate_cards(update, context):
             return
         bin_prefix = command[1].strip()
         if not bin_prefix.isdigit() or len(bin_prefix) < 6:
-            update.message.reply_text("⚠️ BIN must be at least 6 digits!", parse_mode="Markdown")
+            update.message.reply_text("⚠️ BIN must be 6+ digits!", parse_mode="Markdown")
             return
 
         response = f"🛠 *Generated Cards for /gen {bin_prefix}* 🛠\n\n"
@@ -180,21 +184,18 @@ def generate_cards(update, context):
 
         bin_info = get_bin_info(bin_prefix)
         response += "\n🏦 *BIN Info*:\n"
-        if "error" in bin_info:
-            response += f"❌ Error: {bin_info['error']}\n"
-        else:
-            response += f"🏛 Bank: {bin_info['bank']}\n"
-            response += f"💳 Brand: {bin_info['brand']}\n"
-            response += f"📋 Type: {bin_info['type']}\n"
-            response += f"🌍 Country: {bin_info['country']}\n"
-        response += "\nℹ️ Reply with /chk to validate all cards via Stripe charge!"
+        response += f"🏛 Bank: {bin_info.get('bank', 'Unknown')}\n"
+        response += f"💳 Brand: {bin_info.get('brand', 'Unknown')}\n"
+        response += f"📋 Type: {bin_info.get('type', 'Unknown')}\n"
+        response += f"🌍 Country: {bin_info.get('country', 'Unknown')}\n"
+        response += "\nℹ️ Reply with /chk to validate via Stripe charge!"
         update.message.reply_text(response, parse_mode="Markdown")
     except Exception as e:
         update.message.reply_text(f"⚠️ Error: {str(e)}", parse_mode="Markdown")
 
 def check_card(update, context):
     if not stripe.api_key:
-        update.message.reply_text("⚠️ Stripe Secret Key not configured. Contact @DarkDorking.", parse_mode="Markdown")
+        update.message.reply_text("⚠️ Stripe key not configured. Contact @DarkDorking.", parse_mode="Markdown")
         return
     try:
         if update.message.reply_to_message and "Generated Cards" in update.message.reply_to_message.text:
@@ -212,11 +213,11 @@ def check_card(update, context):
                                 "exp_year": int(exp_year),
                                 "cvc": cvc
                             })
-                    except Exception as e:
+                    except Exception:
                         continue
 
             if not cards:
-                update.message.reply_text("⚠️ No valid cards found in the replied message!", parse_mode="Markdown")
+                update.message.reply_text("⚠️ No valid cards found!", parse_mode="Markdown")
                 return
 
             update.message.reply_text("🔄 *Charging cards... Please wait...* 🔄", parse_mode="Markdown")
@@ -251,13 +252,10 @@ def check_card(update, context):
 
             bin_info = get_bin_info(cards[0]["number"])
             results += "\n🏦 *BIN Info*:\n"
-            if "error" in bin_info:
-                results += f"❌ Error: {bin_info['error']}\n"
-            else:
-                results += f"🏛 Bank: {bin_info['bank']}\n"
-                results += f"💳 Brand: {bin_info['brand']}\n"
-                results += f"📋 Type: {bin_info['type']}\n"
-                results += f"🌍 Country: {bin_info['country']}\n"
+            results += f"🏛 Bank: {bin_info.get('bank', 'Unknown')}\n"
+            results += f"💳 Brand: {bin_info.get('brand', 'Unknown')}\n"
+            results += f"📋 Type: {bin_info.get('type', 'Unknown')}\n"
+            results += f"🌍 Country: {bin_info.get('country', 'Unknown')}\n"
             context.bot.edit_message_text(
                 chat_id=message.chat_id,
                 message_id=message.message_id,
@@ -266,7 +264,7 @@ def check_card(update, context):
             )
             return
 
-        # Manual /chk command
+        # Manual /chk
         command = update.message.text.split(" ", 1)
         if len(command) < 2:
             update.message.reply_text("⚠️ Usage: /chk `card_number|exp_month|exp_year|cvc`", parse_mode="Markdown")
@@ -287,13 +285,10 @@ def check_card(update, context):
         if result["status"] == "Dead" and "error" in result:
             response += f"❗ *Error*: {result['error']}\n"
         response += "\n🏦 *BIN Info*:\n"
-        if "error" in bin_info:
-            response += f"❌ Error: {bin_info['error']}\n"
-        else:
-            response += f"🏛 Bank: {bin_info['bank']}\n"
-            response += f"💳 Brand: {bin_info['brand']}\n"
-            response += f"📋 Type: {bin_info['type']}\n"
-            response += f"🌍 Country: {bin_info['country']}\n"
+        response += f"🏛 Bank: {bin_info.get('bank', 'Unknown')}\n"
+        response += f"💳 Brand: {bin_info.get('brand', 'Unknown')}\n"
+        response += f"📋 Type: {bin_info.get('type', 'Unknown')}\n"
+        response += f"🌍 Country: {bin_info.get('country', 'Unknown')}\n"
         update.message.reply_text(response, parse_mode="Markdown")
 
     except Exception as e:
@@ -302,13 +297,13 @@ def check_card(update, context):
 def error_handler(update, context):
     logger.error(f"Update {update} caused error {context.error}")
     if update and update.message:
-        update.message.reply_text("⚠️ An error occurred. Please try again later.", parse_mode="Markdown")
+        update.message.reply_text("⚠️ An error occurred.", parse_mode="Markdown")
 
 def main():
     if not stripe.api_key:
-        logger.error("STRIPE_API_KEY not set in environment variables.")
+        logger.error("STRIPE_API_KEY not set.")
     else:
-        logger.info("Stripe API key loaded successfully.")
+        logger.info("Stripe API key loaded.")
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
