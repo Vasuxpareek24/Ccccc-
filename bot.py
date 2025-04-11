@@ -60,33 +60,19 @@ def get_bin_info(card_number):
         logger.error(f"BIN lookup failed: {str(e)}")
         return {"error": str(e)}
 
-# Card Validation (Simulated with Test Cards)
+# Card Validation
 def validate_card(card_number, exp_month, exp_year, cvc):
     if not stripe.api_key:
         return {"status": "Dead", "error": "Stripe API key not set"}
     try:
-        # Stripe test cards: https://stripe.com/docs/testing#cards
+        # Stripe test cards for simulation
         test_cards = {
             "4242424242424242": "Live",  # Successful payment
             "4000000000000002": "Dead",  # Declined
             "4000000000000341": "Dead",  # Chargeable but declined
         }
         simulated_status = test_cards.get(card_number)
-        if simulated_status:
-            if simulated_status == "Live":
-                payment_method = stripe.PaymentMethod.create(
-                    type="card",
-                    card={
-                        "number": card_number,
-                        "exp_month": exp_month,
-                        "exp_year": exp_year,
-                        "cvc": cvc,
-                    },
-                )
-                return {"status": "Live", "payment_method_id": payment_method.id}
-            return {"status": "Dead", "error": "Card declined (simulated)"}
-        else:
-            # For non-test cards, attempt real validation (will fail with 402 unless raw data access is enabled)
+        if simulated_status == "Live":
             payment_method = stripe.PaymentMethod.create(
                 type="card",
                 card={
@@ -97,6 +83,20 @@ def validate_card(card_number, exp_month, exp_year, cvc):
                 },
             )
             return {"status": "Live", "payment_method_id": payment_method.id}
+        elif simulated_status == "Dead":
+            return {"status": "Dead", "error": "Card declined (simulated test card)"}
+        
+        # Attempt real validation for non-test cards
+        payment_method = stripe.PaymentMethod.create(
+            type="card",
+            card={
+                "number": card_number,
+                "exp_month": exp_month,
+                "exp_year": exp_year,
+                "cvc": cvc,
+            },
+        )
+        return {"status": "Live", "payment_method_id": payment_method.id}
     except stripe.error.CardError as e:
         return {"status": "Dead", "error": str(e.user_message)}
     except stripe.error.StripeError as e:
@@ -137,8 +137,7 @@ def add_sk(update, context):
             update.message.reply_text("⚠️ Invalid Stripe key format! Must start with 'sk_'.", parse_mode="Markdown")
             return
         stripe.api_key = new_sk
-        # Test the key with a simple API call
-        stripe.Balance.retrieve()
+        stripe.Balance.retrieve()  # Verify key
         logger.info(f"Stripe key updated and verified by user {user_id}")
         update.message.reply_text(
             "✅ Stripe Secret Key updated successfully! Set STRIPE_API_KEY in Heroku config to persist across restarts.",
@@ -202,7 +201,7 @@ def generate_cards(update, context):
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
         response += "\nℹ️ Reply with /chk to validate all generated cards!\n"
-        response += "⚠️ Note: Only Stripe test cards (e.g., 424242...) will show as Live unless raw card data access is enabled."
+        response += "ℹ️ Use BIN 424242 for test cards that show as Live."
         update.message.reply_text(response, parse_mode="Markdown")
         logger.info(f"Generated 15 cards for BIN: {bin_prefix}")
     except Exception as e:
@@ -266,9 +265,13 @@ def check_card(update, context):
                 for i, card in enumerate(cards, 1):
                     result = validate_card(card["number"], card["exp_month"], card["exp_year"], card["cvc"])
                     status = result["status"]
-                    masked_number = f"{card['number'][:6]}****{card['number'][-4:]}"
+                    # Use full card number instead of masked
+                    full_number = card["number"]
                     result_text = (
-                        f"💳 *Card {i}*: {masked_number}\n"
+                        f"💳 *Card {i}*\n"
+                        f"🔢 *Card Number*: {full_number}\n"
+                        f"📅 *Expiry*: {card['exp_month']:02d} / {card['exp_year']}\n"
+                        f"🔐 *CVC*: {card['cvc']}\n"
                         f"{'✅' if status == 'Live' else '❌'} *Status*: {status}\n"
                     )
                     if status == "Dead" and "error" in result:
@@ -283,7 +286,7 @@ def check_card(update, context):
                             parse_mode="Markdown"
                         )
                         batch_results = ""
-                    time.sleep(0.5)  # Reduced delay to speed up checking
+                    time.sleep(0.5)
 
                 bin_info = get_bin_info(cards[0]["number"])
                 results += "\n🏦 *BIN Info*:\n"
@@ -292,9 +295,10 @@ def check_card(update, context):
                 else:
                     results += f"🏛 Bank: {bin_info['bank']}\n"
                     results += f"💳 Brand: {bin_info['brand']}\n"
-                    response += f"📋 Type: {bin_info['type']}\n"
-                    response += f"🌍 Country: {bin_info['country']}\n"
-                results += "\n⚠️ Note: Only Stripe test cards (e.g., 424242...) will show as Live unless raw card data access is enabled."
+                    results += f"📋 Type: {bin_info['type']}\n"
+                    results += f"🌍 Country: {bin_info['country']}\n"
+                results += "\nℹ️ Use BIN 424242 for test cards that show as Live.\n"
+                results += "ℹ️ For real validation, enable raw card data access in Stripe: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
                 context.bot.edit_message_text(
                     chat_id=message.chat_id,
                     message_id=message.message_id,
@@ -319,7 +323,7 @@ def check_card(update, context):
         result = validate_card(card_number, int(exp_month), int(exp_year), cvc)
         bin_info = get_bin_info(card_number)
         response = f"💳 *Card Validation Result* 💳\n\n"
-        response += f"🔢 *Card Number*: {card_number[:6]}****{card_number[-4:]}\n"
+        response += f"🔢 *Card Number*: {card_number}\n"  # Full card number
         response += f"📅 *Expiry*: {exp_month}/{exp_year}\n"
         response += f"🔐 *CVC*: {cvc}\n\n"
         response += f"{'✅' if result['status'] == 'Live' else '❌'} *Status*: {result['status']}\n"
@@ -333,7 +337,8 @@ def check_card(update, context):
             response += f"💳 Brand: {bin_info['brand']}\n"
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
-        response += "\n⚠️ Note: Only Stripe test cards (e.g., 424242...) will show as Live unless raw card data access is enabled."
+        response += "\nℹ️ Use BIN 424242 for test cards that show as Live.\n"
+        response += "ℹ️ For real validation, enable raw card data access in Stripe: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
         update.message.reply_text(response, parse_mode="Markdown")
 
     except Exception as e:
