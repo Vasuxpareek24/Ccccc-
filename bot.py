@@ -73,7 +73,7 @@ def get_bin_info(card_number):
 def validate_card(card_number, exp_month, exp_year, cvc):
     if not stripe.api_key:
         return {"status": "Dead", "error": "Stripe API key not configured. Contact admin to set STRIPE_API_KEY."}
-    
+
     # Check if it’s a test card
     if card_number not in STRIPE_TEST_CARDS:
         return {"status": "Dead", "error": "Only Stripe test cards (e.g., 4242424242424242) are supported without raw card data access. See https://stripe.com/docs/testing#cards"}
