@@ -19,10 +19,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8071747780:AAF_oRPKCf38r2vBlgGEkPQ
 ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "6972264549").split(",") if id.isdigit()]
 BIN_LOOKUP_URL = "https://lookup.binlist.net/"
 
-# Initialize Stripe key from environment
+# Initialize Stripe key
 stripe.api_key = os.getenv("STRIPE_API_KEY")
 
-# Luhn Algorithm (unchanged)
+# Luhn Algorithm
 def luhn_checksum(card_number):
     def digits_of(n):
         return [int(d) for d in str(n)]
@@ -38,14 +38,19 @@ def is_luhn_valid(card_number):
     return luhn_checksum(card_number) == 0
 
 def generate_card_number(bin_prefix, length=16):
+    if not bin_prefix.isdigit() or len(bin_prefix) != 6:
+        logger.error(f"Invalid BIN prefix: {bin_prefix}")
+        return None
     card_number = bin_prefix + ''.join(random.choice(string.digits) for _ in range(length - len(bin_prefix) - 1))
     for i in range(10):
         candidate = card_number + str(i)
         if is_luhn_valid(candidate):
+            logger.debug(f"Generated card number: {candidate}")
             return candidate
+    logger.error(f"Failed to generate valid card for BIN: {bin_prefix}")
     return None
 
-# BIN Lookup (unchanged)
+# BIN Lookup
 def get_bin_info(card_number):
     try:
         bin_number = card_number[:6]
@@ -62,9 +67,12 @@ def get_bin_info(card_number):
         logger.error(f"BIN lookup failed: {str(e)}")
         return {"error": str(e)}
 
-# Stripe Card Validation (unchanged)
+# Stripe Card Validation
 def validate_card(card_number, exp_month, exp_year, cvc):
     try:
+        if len(card_number) != 16:
+            logger.warning(f"Invalid card length: {card_number}")
+            return {"status": "Dead", "error": "Card number must be 16 digits"}
         payment_method = stripe.PaymentMethod.create(
             type="card",
             card={
@@ -125,9 +133,7 @@ def add_sk(update, context):
             )
             return
 
-        # Update stripe.api_key
         stripe.api_key = new_sk
-        # Store in environment for Heroku (optional, requires Heroku CLI or manual config)
         logger.info(f"Stripe key updated by user {user_id}")
         update.message.reply_text(
             "✅ Stripe Secret Key updated successfully! Note: Set STRIPE_API_KEY in Heroku config to persist across restarts.",
@@ -180,15 +186,15 @@ def generate_cards(update, context):
             return
 
         bin_prefix = command[1].strip()
-        if not bin_prefix.isdigit() or len(bin_prefix) < 6:
-            update.message.reply_text("⚠️ BIN must be at least 6 digits!", parse_mode="Markdown")
+        if not bin_prefix.isdigit() or len(bin_prefix) != 6:
+            update.message.reply_text("⚠️ BIN must be exactly 6 digits!", parse_mode="Markdown")
             return
 
         response = f"🛠 *Generated Cards for /gen {bin_prefix}* 🛠\n\n"
         cards = []
         for _ in range(15):
             card_number = generate_card_number(bin_prefix)
-            if card_number:
+            if card_number and len(card_number) == 16:
                 exp_month = random.randint(1, 12)
                 exp_year = random.randint(2025, 2030)
                 cvc = ''.join(random.choice(string.digits) for _ in range(3))
@@ -196,6 +202,14 @@ def generate_cards(update, context):
                 cards.append({"number": card_number, "exp_month": exp_month, "exp_year": exp_year, "cvc": cvc})
             else:
                 response += "❌ Failed to generate a valid card\n"
+                logger.warning(f"Failed to generate card for BIN: {bin_prefix}")
+
+        if not cards:
+            update.message.reply_text(
+                "⚠️ No valid cards could be generated!",
+                parse_mode="Markdown"
+            )
+            return
 
         bin_info = get_bin_info(bin_prefix)
         response += "\n🏦 *BIN Info*:\n"
@@ -208,6 +222,7 @@ def generate_cards(update, context):
             response += f"🌍 *Country*: {bin_info['country']}\n"
 
         response += "\nℹ️ Reply with /chk to validate all generated cards!"
+        logger.info(f"Generated {len(cards)} cards for BIN: {bin_prefix}")
         update.message.reply_text(response, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error in generate_cards: {str(e)}")
@@ -224,7 +239,6 @@ def check_card(update, context):
         return
 
     try:
-        # Handle reply to /gen message
         if update.message.reply_to_message:
             logger.info(f"Reply detected. Replied message text: {update.message.reply_to_message.text[:100]}...")
             original_message = update.message.reply_to_message.text
@@ -241,14 +255,15 @@ def check_card(update, context):
                                 exp_month = card_data[1].strip()
                                 exp_year = card_data[2].strip()
                                 cvc = card_data[3].strip()
-                                if (card_number.isdigit() and exp_month.isdigit() and
-                                        exp_year.isdigit() and cvc.isdigit()):
+                                if (card_number.isdigit() and len(card_number) == 16 and
+                                        exp_month.isdigit() and exp_year.isdigit() and cvc.isdigit()):
                                     cards.append({
                                         "number": card_number,
                                         "exp_month": int(exp_month),
                                         "exp_year": int(exp_year),
                                         "cvc": cvc
                                     })
+                                    logger.debug(f"Parsed card: {card_number}")
                                 else:
                                     logger.warning(f"Invalid card data in line: {line}")
                             else:
@@ -323,10 +338,6 @@ def check_card(update, context):
                 logger.info("Card checking completed")
                 return
 
-            else:
-                logger.info("Replied message is not a /gen message")
-
-        # Manual /chk command
         logger.info("Processing as manual /chk command")
         command = update.message.text.split(" ", 1)
         if len(command) < 2:
