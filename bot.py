@@ -104,12 +104,11 @@ def start(update, context):
         "This is a card validation and generation bot for educational purposes.\n"
         "Join our channel: @DarkDorking for updates!\n\n"
         "🔍 *Commands:*\n"
-        "/chk <card_number>|<exp_month>|<exp_year>|<cvc> - Validate a card\n"
-        "/gen <bin> - Generate 15 cards with given BIN\n"
+        "/chk `card_number|exp_month|exp_year|cvc` - Validate a card\n"
+        "/gen `bin` - Generate 15 cards with given BIN\n"
         "Reply /chk to a /gen message to check all generated cards\n"
     )
     update.message.reply_text(welcome_message, parse_mode="Markdown")
-
 def add_sk(update, context):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
