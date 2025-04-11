@@ -176,7 +176,7 @@ async def fake(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # Replace with your actual bot token from BotFather
-    TOKEN = "YOUR_BOT_TOKEN"  # <--- Yahan apna token daal do
+    TOKEN = "8071747780:AAF_oRPKCf38r2vBlgGEkPQzfQeFAsN5H0k"  # <--- Yahan apna token daal do
     
     application = Application.builder().token(TOKEN).build()
     
