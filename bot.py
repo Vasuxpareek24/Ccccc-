@@ -18,29 +18,9 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8071747780:AAF_oRPKCf38r2vBlgGEkPQzfQeFAsN5H0k")
 ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "6972264549").split(",") if id.isdigit()]
 BIN_LOOKUP_URL = "https://lookup.binlist.net/"
-SK_FILE = "sk.txt"
 
-# Load/Save SK (unchanged)
-def load_sk():
-    if os.path.exists(SK_FILE):
-        with open(SK_FILE, "r") as f:
-            sk = f.read().strip()
-            if sk:
-                stripe.api_key = sk
-                return sk
-    return None
-
-def save_sk(sk):
-    with open(SK_FILE, "w") as f:
-        f.write(sk)
-    stripe.api_key = sk
-
-def remove_sk():
-    if os.path.exists(SK_FILE):
-        os.remove(SK_FILE)
-    stripe.api_key = None
-
-load_sk()
+# Initialize Stripe key from environment
+stripe.api_key = os.getenv("STRIPE_API_KEY")
 
 # Luhn Algorithm (unchanged)
 def luhn_checksum(card_number):
@@ -113,11 +93,80 @@ def start(update, context):
         "/chk `card_number|exp_month|exp_year|cvc` - Validate a card\n"
         "/gen `bin` - Generate 15 cards with given BIN\n"
         "Reply /chk to a /gen message to check all generated cards\n"
+        "/addsk `secret_key` - Update Stripe key (admin only)\n"
+        "/removesk - Remove Stripe key (admin only)"
     )
     update.message.reply_text(welcome_message, parse_mode="Markdown")
 
+def add_sk(update, context):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        logger.info(f"Unauthorized /addsk attempt by user {user_id}")
+        update.message.reply_text(
+            "🚫 You are not authorized to use this command!",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        command = update.message.text.split(" ", 1)
+        if len(command) < 2:
+            update.message.reply_text(
+                "⚠️ Usage: /addsk `secret_key`",
+                parse_mode="Markdown"
+            )
+            return
+
+        new_sk = command[1].strip()
+        if not new_sk.startswith("sk_"):
+            update.message.reply_text(
+                "⚠️ Invalid Stripe key format! Must start with 'sk_'.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Update stripe.api_key
+        stripe.api_key = new_sk
+        # Store in environment for Heroku (optional, requires Heroku CLI or manual config)
+        logger.info(f"Stripe key updated by user {user_id}")
+        update.message.reply_text(
+            "✅ Stripe Secret Key updated successfully! Note: Set STRIPE_API_KEY in Heroku config to persist across restarts.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error in add_sk: {str(e)}")
+        update.message.reply_text(
+            f"⚠️ Error updating Stripe key: {str(e)}",
+            parse_mode="Markdown"
+        )
+
+def remove_sk_command(update, context):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        logger.info(f"Unauthorized /removesk attempt by user {user_id}")
+        update.message.reply_text(
+            "🚫 You are not authorized to use this command!",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        stripe.api_key = None
+        logger.info(f"Stripe key removed by user {user_id}")
+        update.message.reply_text(
+            "✅ Stripe Secret Key removed successfully!",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error in remove_sk: {str(e)}")
+        update.message.reply_text(
+            f"⚠️ Error: {str(e)}",
+            parse_mode="Markdown"
+        )
+
 def generate_cards(update, context):
     if not stripe.api_key:
+        logger.warning("Stripe key not set for /gen")
         update.message.reply_text(
             "⚠️ Stripe Secret Key is not set. Please contact @DarkDorking for support.",
             parse_mode="Markdown"
@@ -165,7 +214,9 @@ def generate_cards(update, context):
         update.message.reply_text(f"⚠️ Error: {str(e)}", parse_mode="Markdown")
 
 def check_card(update, context):
+    logger.info(f"Received /chk command from user {update.effective_user.id}")
     if not stripe.api_key:
+        logger.warning("Stripe key not set for /chk")
         update.message.reply_text(
             "⚠️ Stripe Secret Key is not set. Please contact @DarkDorking for support.",
             parse_mode="Markdown"
@@ -173,14 +224,10 @@ def check_card(update, context):
         return
 
     try:
-        # Log for debugging
-        logger.info(f"Received /chk command from user {update.effective_user.id}")
-
         # Handle reply to /gen message
         if update.message.reply_to_message:
             logger.info(f"Reply detected. Replied message text: {update.message.reply_to_message.text[:100]}...")
             original_message = update.message.reply_to_message.text
-            # Check if it's a /gen message (look for "Generated Cards" instead of just "/gen")
             if "Generated Cards" in original_message:
                 logger.info("Processing as reply to /gen message")
                 lines = original_message.split("\n")
@@ -218,7 +265,6 @@ def check_card(update, context):
                     )
                     return
 
-                # Real-time checking
                 logger.info(f"Checking {len(cards)} cards")
                 update.message.reply_text(
                     "🔄 *Checking cards... Please wait...* 🔄",
@@ -256,9 +302,8 @@ def check_card(update, context):
                             parse_mode="Markdown"
                         )
                         batch_results = ""
-                    time.sleep(1)  # Avoid rate limits
+                    time.sleep(1)
 
-                # Add BIN info
                 bin_info = get_bin_info(cards[0]["number"])
                 results += "\n🏦 *BIN Info*:\n"
                 if "error" in bin_info:
@@ -340,6 +385,8 @@ def main():
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("addsk", add_sk))
+    dp.add_handler(CommandHandler("removesk", remove_sk_command))
     dp.add_handler(CommandHandler("chk", check_card))
     dp.add_handler(CommandHandler("gen", generate_cards))
     dp.add_error_handler(error_handler)
