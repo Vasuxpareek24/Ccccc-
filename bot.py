@@ -60,52 +60,47 @@ def get_bin_info(card_number):
         logger.error(f"BIN lookup failed: {str(e)}")
         return {"error": str(e)}
 
-# Card Validation with Expanded Simulation
+# Card Validation with Stripe Payment Intent
 def validate_card(card_number, exp_month, exp_year, cvc):
     if not stripe.api_key:
         return {"status": "Dead", "error": "Stripe API key not configured. Contact admin to set STRIPE_API_KEY."}
     try:
-        # Expanded Stripe test cards (https://stripe.com/docs/testing#cards)
-        test_cards = {
-            "4242424242424242": "Live",  # Visa success
-            "4000000000000002": "Dead",  # Declined
-            "4000000000000341": "Dead",  # Chargeable but declined
-            "4000000000009995": "Dead",  # Insufficient funds
-            "4000000000000069": "Dead",  # Expired
-        }
-        simulated_status = test_cards.get(card_number)
-        if simulated_status == "Live":
-            payment_method = stripe.PaymentMethod.create(
-                type="card",
-                card={
-                    "number": card_number,
-                    "exp_month": exp_month,
-                    "exp_year": exp_year,
-                    "cvc": cvc,
-                },
-            )
-            return {"status": "Live", "payment_method_id": payment_method.id}
-        elif simulated_status == "Dead":
-            return {"status": "Dead", "error": "Card declined (simulated test card)"}
+        # Create a Payment Method
+        payment_method = stripe.PaymentMethod.create(
+            type="card",
+            card={
+                "number": card_number,
+                "exp_month": exp_month,
+                "exp_year": exp_year,
+                "cvc": cvc,
+            },
+        )
         
-        # For non-test cards, attempt real validation (will fail with 402 until approved)
-        try:
-            payment_method = stripe.PaymentMethod.create(
-                type="card",
-                card={
-                    "number": card_number,
-                    "exp_month": exp_month,
-                    "exp_year": exp_year,
-                    "cvc": cvc,
-                },
-            )
-            return {"status": "Live", "payment_method_id": payment_method.id}
-        except stripe.error.StripeError as e:
-            # Fallback: Simulate Live/Dead randomly until raw data access is enabled
-            simulated_result = random.choice(["Live", "Dead"])
-            if simulated_result == "Live":
-                return {"status": "Live", "note": "Simulated as Live (pending raw card data access)"}
-            return {"status": "Dead", "error": "Simulated decline (pending raw card data access)"}
+        # Create a Payment Intent with minimal amount (e.g., $1 = 100 cents)
+        payment_intent = stripe.PaymentIntent.create(
+            amount=100,  # $1 in cents
+            currency="usd",
+            payment_method=payment_method.id,
+            confirmation_method="manual",
+            confirm=True,
+            description="Test card validation",
+            return_url="https://example.com/return"  # Dummy URL, not needed for bot
+        )
+        
+        # Check Payment Intent status
+        if payment_intent.status == "succeeded":
+            return {"status": "Live", "payment_intent_id": payment_intent.id}
+        elif payment_intent.status in ["requires_action", "requires_payment_method"]:
+            return {"status": "Dead", "error": "Card requires additional action or declined"}
+        else:
+            return {"status": "Dead", "error": f"Payment failed: {payment_intent.status}"}
+    except stripe.error.CardError as e:
+        return {"status": "Dead", "error": str(e.user_message)}
+    except stripe.error.StripeError as e:
+        if "Sending credit card numbers directly" in str(e):
+            # Fallback for 402 error: Mark as Dead with clear message
+            return {"status": "Dead", "error": "Card validation not possible without raw card data access"}
+        return {"status": "Dead", "error": str(e)}
     except Exception as e:
         logger.error(f"Unexpected error in validate_card: {str(e)}")
         return {"status": "Dead", "error": "Unknown error"}
@@ -115,7 +110,7 @@ def start(update, context):
     user = update.effective_user
     welcome_message = (
         f"👋 *Welcome, {user.first_name}!* 👋\n"
-        "This is a card validation and generation bot for educational purposes.\n"
+        "This is a card validation and generation bot using Stripe.\n"
         "Join our channel: @DarkDorking for updates!\n\n"
         "🔍 *Commands:*\n"
         "/chk `card_number|exp_month|exp_year|cvc` - Validate a card\n"
@@ -143,7 +138,7 @@ def add_sk(update, context):
             return
         stripe.api_key = new_sk
         stripe.Balance.retrieve()
-        logger.info(f"Stripe key updated and verified by user {user_id}")
+        logger.info(f"Stripe key updated by user {user_id}")
         update.message.reply_text(
             "✅ Stripe Secret Key updated successfully! Set STRIPE_API_KEY in Heroku config to persist across restarts.",
             parse_mode="Markdown"
@@ -206,8 +201,7 @@ def generate_cards(update, context):
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
         response += "\nℹ️ Reply with /chk to validate all generated cards!\n"
-        response += "ℹ️ Use BIN 424242 for test cards that show as Live.\n"
-        response += "ℹ️ Non-test cards are simulated until raw card data access is enabled."
+        response += "ℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results."
         update.message.reply_text(response, parse_mode="Markdown")
         logger.info(f"Generated 15 cards for BIN: {bin_prefix}")
     except Exception as e:
@@ -281,8 +275,6 @@ def check_card(update, context):
                     )
                     if status == "Dead" and "error" in result:
                         result_text += f"❗ Reason: {result['error']}\n"
-                    elif "note" in result:
-                        result_text += f"ℹ️ Note: {result['note']}\n"
                     batch_results += result_text + "\n"
                     if i % batch_size == 0 or i == len(cards):
                         results += batch_results
@@ -304,8 +296,7 @@ def check_card(update, context):
                     results += f"💳 Brand: {bin_info['brand']}\n"
                     results += f"📋 Type: {bin_info['type']}\n"
                     results += f"🌍 Country: {bin_info['country']}\n"
-                results += "\nℹ️ Use BIN 424242 for test cards that show as Live.\n"
-                results += "ℹ️ Non-test cards are simulated until raw card data access is enabled: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
+                results += "\nℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results."
                 context.bot.edit_message_text(
                     chat_id=message.chat_id,
                     message_id=message.message_id,
@@ -336,8 +327,6 @@ def check_card(update, context):
         response += f"{'✅' if result['status'] == 'Live' else '❌'} *Status*: {result['status']}\n"
         if result["status"] == "Dead" and "error" in result:
             response += f"❗ *Error*: {result['error']}\n"
-        elif "note" in result:
-            response += f"ℹ️ Note: {result['note']}\n"
         response += "\n🏦 *BIN Info*:\n"
         if "error" in bin_info:
             response += f"❌ Error: {bin_info['error']}\n"
@@ -346,8 +335,7 @@ def check_card(update, context):
             response += f"💳 Brand: {bin_info['brand']}\n"
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
-        response += "\nℹ️ Use BIN 424242 for test cards that show as Live.\n"
-        response += "ℹ️ Non-test cards are simulated until raw card data access is enabled: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
+        response += "\nℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results."
         update.message.reply_text(response, parse_mode="Markdown")
 
     except Exception as e:
@@ -361,7 +349,7 @@ def error_handler(update, context):
 
 def main():
     if not stripe.api_key:
-        logger.error("STRIPE_API_KEY not set in environment variables. Bot will not function until configured.")
+        logger.error("STRIPE_API_KEY not set in environment variables.")
     else:
         logger.info("Stripe API key loaded successfully from environment.")
     updater = Updater(TELEGRAM_TOKEN, use_context=True)
