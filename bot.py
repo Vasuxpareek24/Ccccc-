@@ -20,6 +20,15 @@ ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "6972264549").split(",") i
 BIN_LOOKUP_URL = "https://lookup.binlist.net/"
 stripe.api_key = os.getenv("STRIPE_API_KEY")
 
+# Stripe Test Cards
+STRIPE_TEST_CARDS = {
+    "4242424242424242": "Live",  # Visa success
+    "4000000000000002": "Dead - Declined",
+    "4000000000009995": "Dead - Insufficient funds",
+    "4000000000000069": "Dead - Expired",
+    "4000000000000127": "Dead - Incorrect CVC",
+}
+
 # Luhn Algorithm
 def luhn_checksum(card_number):
     def digits_of(n):
@@ -60,12 +69,17 @@ def get_bin_info(card_number):
         logger.error(f"BIN lookup failed: {str(e)}")
         return {"error": str(e)}
 
-# Card Validation with Pre-Authorization Charge
+# Card Validation with Pre-Authorization Charge (Test Cards Only)
 def validate_card(card_number, exp_month, exp_year, cvc):
     if not stripe.api_key:
         return {"status": "Dead", "error": "Stripe API key not configured. Contact admin to set STRIPE_API_KEY."}
+    
+    # Check if it’s a test card
+    if card_number not in STRIPE_TEST_CARDS:
+        return {"status": "Dead", "error": "Only Stripe test cards (e.g., 4242424242424242) are supported without raw card data access. See https://stripe.com/docs/testing#cards"}
+
     try:
-        # Step 1: Create a Payment Method
+        # Create a Payment Method
         payment_method = stripe.PaymentMethod.create(
             type="card",
             card={
@@ -76,32 +90,30 @@ def validate_card(card_number, exp_month, exp_year, cvc):
             },
         )
 
-        # Step 2: Create a Payment Intent for pre-authorization ($1)
+        # Create a Payment Intent for pre-authorization ($1)
         payment_intent = stripe.PaymentIntent.create(
             amount=100,  # $1 in cents
             currency="usd",
             payment_method=payment_method.id,
-            capture_method="manual",  # Authorize only, don’t capture
+            capture_method="manual",  # Authorize only
             confirmation_method="manual",
             confirm=True,
             description="Test card validation (pre-auth)",
         )
 
-        # Step 3: Check the Payment Intent status
+        # Check the Payment Intent status
         if payment_intent.status == "requires_capture":
-            # Card is valid and authorized, but not captured
-            stripe.PaymentIntent.cancel(payment_intent.id)  # Cancel to avoid holding funds
+            stripe.PaymentIntent.cancel(payment_intent.id)  # Cancel to release hold
             return {"status": "Live", "payment_intent_id": payment_intent.id}
         elif payment_intent.status == "requires_action":
-            return {"status": "Dead", "error": "Card requires additional authentication (e.g., 3D Secure)"}
+            return {"status": "Dead", "error": "Card requires additional authentication"}
         else:
-            return {"status": "Dead", "error": f"Payment failed: {payment_intent.last_payment_error.message if payment_intent.last_payment_error else payment_intent.status}"}
+            error_msg = payment_intent.last_payment_error.message if payment_intent.last_payment_error else payment_intent.status
+            return {"status": "Dead", "error": f"Payment failed: {error_msg}"}
 
     except stripe.error.CardError as e:
         return {"status": "Dead", "error": str(e.user_message)}
     except stripe.error.StripeError as e:
-        if "Sending credit card numbers directly" in str(e):
-            return {"status": "Dead", "error": "Card validation blocked by Stripe. Use test cards (e.g., 4242424242424242) or request raw card data access: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"}
         return {"status": "Dead", "error": str(e)}
     except Exception as e:
         logger.error(f"Unexpected error in validate_card: {str(e)}")
@@ -119,7 +131,8 @@ def start(update, context):
         "/gen `bin` - Generate 15 cards with given BIN\n"
         "Reply /chk to a /gen message to check all generated cards\n"
         "/addsk `secret_key` - Update Stripe key (admin only)\n"
-        "/removesk - Remove Stripe key (admin only)"
+        "/removesk - Remove Stripe key (admin only)\n\n"
+        "ℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now. Request raw card data access for full functionality: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
     )
     update.message.reply_text(welcome_message, parse_mode="Markdown")
 
@@ -203,7 +216,7 @@ def generate_cards(update, context):
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
         response += "\nℹ️ Reply with /chk to validate all generated cards!\n"
-        response += "ℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results."
+        response += "ℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now."
         update.message.reply_text(response, parse_mode="Markdown")
         logger.info(f"Generated 15 cards for BIN: {bin_prefix}")
     except Exception as e:
@@ -298,8 +311,8 @@ def check_card(update, context):
                     results += f"💳 Brand: {bin_info['brand']}\n"
                     results += f"📋 Type: {bin_info['type']}\n"
                     results += f"🌍 Country: {bin_info['country']}\n"
-                results += "\nℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results.\n"
-                results += "ℹ️ Non-test cards may fail due to Stripe restrictions."
+                results += "\nℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now.\n"
+                results += "ℹ️ Request raw card data access for non-test cards: https://support.stripe.com/questions/enabling-access-to-raw-card-data-apis"
                 context.bot.edit_message_text(
                     chat_id=message.chat_id,
                     message_id=message.message_id,
@@ -338,7 +351,7 @@ def check_card(update, context):
             response += f"💳 Brand: {bin_info['brand']}\n"
             response += f"📋 Type: {bin_info['type']}\n"
             response += f"🌍 Country: {bin_info['country']}\n"
-        response += "\nℹ️ Use Stripe test cards (e.g., 4242424242424242) for Live results."
+        response += "\nℹ️ Only Stripe test cards (e.g., 4242424242424242) work for now."
         update.message.reply_text(response, parse_mode="Markdown")
 
     except Exception as e:
